@@ -233,35 +233,32 @@ if($mybb->settings['portal_showwol'] != 0 && $mybb->usergroup['canviewonline'] !
 	}
 
 	$timesearch = TIME_NOW - $mybb->settings['wolcutoff'];
-	$comma = '';
 	$guestcount = $membercount = $botcount = $anoncount = 0;
-	$onlinemembers = '';
-	$doneusers = array();
+	$doneusers = $onlinemembers = $onlinebots = array();
+
+	$query = $db->simple_select("sessions", "COUNT(DISTINCT ip) AS guestcount", "uid = 0 AND time > $timesearch");
+	$guestcount = $db->fetch_field($query, "guestcount");
+
 	$query = $db->query("
-		SELECT s.sid, s.ip, s.uid, s.time, s.location, u.username, u.invisible, u.usergroup, u.displaygroup
-		FROM ".TABLE_PREFIX."sessions s
-		LEFT JOIN ".TABLE_PREFIX."users u ON (s.uid=u.uid)
-		WHERE s.time>'$timesearch'
+		SELECT
+			s.sid, s.ip, s.uid, s.time, s.location, u.username, u.invisible, u.usergroup, u.displaygroup
+		FROM
+			".TABLE_PREFIX."sessions s
+			LEFT JOIN ".TABLE_PREFIX."users u ON (s.uid=u.uid)
+		WHERE (s.uid != 0 OR SUBSTR(s.sid,4,1) = '=') AND s.time > $timesearch
 		ORDER BY {$order_by}, {$order_by2}
 	");
+
+	// Fetch spiders
+	$spiders = $cache->read('spiders');
+
 	while($user = $db->fetch_array($query))
 	{
 
 		// Create a key to test if this user is a search bot.
 		$botkey = my_strtolower(str_replace("bot=", '', $user['sid']));
 
-		if($user['uid'] == "0")
-		{
-			++$guestcount;
-		}
-		elseif(my_strpos($user['sid'], "bot=") !== false && $session->bots[$botkey])
-		{
-			// The user is a search bot.
-			$onlinemembers .= $comma.format_name($session->bots[$botkey], $session->botgroup);
-			$comma = $lang->comma;
-			++$botcount;
-		}
-		else
+		if($user['uid'] > 0)
 		{
 			if(empty($doneusers[$user['uid']]) || $doneusers[$user['uid']] < $user['time'])
 			{
@@ -288,11 +285,46 @@ if($mybb->settings['portal_showwol'] != 0 && $mybb->usergroup['canviewonline'] !
 				{
 					$user['username'] = format_name(htmlspecialchars_uni($user['username']), $user['usergroup'], $user['displaygroup']);
 					$user['profilelink'] = get_profile_link($user['uid']);
-					eval("\$onlinemembers .= \"".$templates->get("portal_whosonline_memberbit", 1, 0)."\";");
-					$comma = $lang->comma;
+					eval("\$onlinemembers[] = \"".$templates->get("portal_whosonline_memberbit", 1, 0)."\";");
 				}
 			}
 		}
+		elseif(my_strpos($user['sid'], 'bot=') !== false && $spiders[$botkey])
+		{
+			// The user is a search bot.
+			if($mybb->settings['wolorder'] == 'username')
+			{
+				$key = $spiders[$botkey]['name'];
+			}
+			else
+			{
+				$key = $user['time'];
+			}
+
+			$onlinebots[$key] = format_name($spiders[$botkey]['name'], $spiders[$botkey]['usergroup']);
+			++$botcount;
+		}
+	}
+
+	if($mybb->settings['wolorder'] == 'activity')
+	{
+		// activity ordering is DESC, username is ASC
+		krsort($onlinebots);
+	}
+	else
+	{
+		ksort($onlinebots);
+	}
+
+	$onlinemembers = array_merge($onlinebots, $onlinemembers);
+	if(!empty($onlinemembers))
+	{
+		$comma = $lang->comma." ";
+		$onlinemembers = implode($comma, $onlinemembers);
+	}
+	else
+	{
+		$onlinemembers = "";
 	}
 
 	$onlinecount = $membercount + $guestcount + $botcount;
@@ -365,7 +397,14 @@ if($mybb->settings['portal_showdiscussions'] != 0 && $mybb->settings['portal_sho
 		}
 
 		$lastpostdate = my_date('relative', $thread['lastpost']);
-		$lastposter = htmlspecialchars_uni($thread['lastposter']);
+		if(!$thread['lastposteruid'] && !$thread['lastposter'])
+		{
+			$lastposter = htmlspecialchars_uni($lang->guest);
+		}
+		else
+		{
+			$lastposter = htmlspecialchars_uni($thread['lastposter']);
+		}
 		$thread['replies'] = my_number_format($thread['replies']);
 		$thread['views'] = my_number_format($thread['views']);
 
@@ -538,9 +577,15 @@ if(!empty($mybb->settings['portal_announcementsfid']))
 			$announcement['threadlink'] = get_thread_link($announcement['tid']);
 			$announcement['forumlink'] = get_forum_link($announcement['fid']);
 			$announcement['forumname'] = $forum_cache[$announcement['fid']]['name'];
-
 			$announcement['username'] = htmlspecialchars_uni($announcement['username']);
-			$announcement['threadusername'] = htmlspecialchars_uni($announcement['threadusername']);
+			if(!$announcement['uid'] && !$announcement['threadusername'])
+			{
+				$announcement['threadusername'] = htmlspecialchars_uni($lang->guest);
+			}
+			else
+			{
+				$announcement['threadusername'] = htmlspecialchars_uni($announcement['threadusername']);
+			}
 
 			if($announcement['uid'] == 0)
 			{
@@ -593,7 +638,7 @@ if(!empty($mybb->settings['portal_announcementsfid']))
 			$plugins->run_hooks("portal_announcement");
 
 			$parser_options = array(
-				"allow_html" => $forum[$announcement['fid']]['allowhtml'],
+				"allow_html" => $mybb->settings['announcementshtml'] && $forum[$announcement['fid']]['allowhtml'],
 				"allow_mycode" => $forum[$announcement['fid']]['allowmycode'],
 				"allow_smilies" => $forum[$announcement['fid']]['allowsmilies'],
 				"allow_imgcode" => $forum[$announcement['fid']]['allowimgcode'],
@@ -639,6 +684,11 @@ if(!empty($mybb->settings['portal_announcementsfid']))
 							$isimage = false;
 						}
 						$attachment['icon'] = get_attachment_icon($ext);
+						if(!$attachment['dateuploaded'])
+						{
+							$attachment['dateuploaded'] = $announcement['dateline'];
+						}
+						$attachdate = my_date('normal', $attachment['dateuploaded']);
 						// Support for [attachment=id] code
 						if(stripos($message, "[attachment=".$attachment['aid']."]") !== false)
 						{

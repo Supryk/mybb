@@ -138,7 +138,7 @@ class PostDataHandler extends DataHandler
 			$post['username'] = $user['username'];
 		}
 		// if the uid is 0 verify the username
-		else if($post['uid'] == 0 && $post['username'] != $lang->guest)
+		else if($post['uid'] == 0 && $post['username'] != '')
 		{
 			// Set up user handler
 			require_once MYBB_ROOT."inc/datahandlers/user.php";
@@ -160,12 +160,6 @@ class PostDataHandler extends DataHandler
 				$this->errors = array_merge($this->errors, $userhandler->get_errors());
 				return false;
 			}
-		}
-
-		// After all of this, if we still don't have a username, force the username as "Guest" (Note, this is not translatable as it is always a fallback)
-		if(!$post['username'])
-		{
-			$post['username'] = "Guest";
 		}
 
 		return true;
@@ -247,7 +241,7 @@ class PostDataHandler extends DataHandler
 	 */
 	function verify_message()
 	{
-		global $mybb;
+		global $db, $mybb;
 
 		$post = &$this->data;
 		$post['message'] = trim_blank_chrs($post['message']);
@@ -258,21 +252,56 @@ class PostDataHandler extends DataHandler
 			$this->set_error("missing_message");
 			return false;
 		}
-
-		// If this board has a maximum message length check if we're over it. Use strlen because SQL limits are in bytes
-		else if(strlen($post['message']) > $mybb->settings['maxmessagelength'] && $mybb->settings['maxmessagelength'] > 0 && !is_moderator($post['fid'], "", $post['uid']))
-		{
-			$this->set_error("message_too_long", array($mybb->settings['maxmessagelength'], strlen($post['message'])));
-			return false;
-		}
-
-		// And if we've got a minimum message length do we meet that requirement too?
 		else
 		{
+			$limit = (int)$mybb->settings['maxmessagelength'];
+			$dblimit = 0;
+
+			// If database is mysql or mysqli check field type and set max database limit
+			if(stripos($db->type, 'my') !== false)
+			{
+				$fields = $db->show_fields_from("posts");
+				$type = $fields[array_search('message', array_column($fields, 'Field'))]['Type'];
+				switch(strtolower($type))
+				{
+					case 'longtext':
+						$dblimit = 4294967295;
+						break;
+					case 'mediumtext':
+						$dblimit = 16777215;
+						break;
+					case 'text':
+					default:
+						$dblimit = 65535;
+						break;
+				}
+			}
+
+			if($limit > 0 || $dblimit > 0)
+			{
+				$is_moderator = is_moderator($post['fid'], "", $post['uid']);
+				// Consider minimum in user defined and database limit other than 0
+				if($limit > 0 && $dblimit > 0)
+				{
+					$limit = $is_moderator ? $dblimit : min($limit, $dblimit);
+				}
+				else
+				{
+					$limit = max($limit, $dblimit);
+				}
+
+				if(strlen($post['message']) > $limit && (!$is_moderator || $limit == $dblimit))
+				{
+					$this->set_error("message_too_long", array($limit, strlen($post['message'])));
+					return false;
+				}
+			}
+
 			if(!isset($post['fid']))
 			{
 				$post['fid'] = 0;
 			}
+
 			if(!$mybb->settings['mycodemessagelength'])
 			{
 				// Check to see of the text is full of MyCode
@@ -562,8 +591,7 @@ class PostDataHandler extends DataHandler
 			$options = array(
 				"limit_start" => 0,
 				"limit" => 1,
-				"order_by" => "dateline",
-				"order_dir" => "asc"
+				"order_by" => "dateline, pid",
 			);
 			$query = $db->simple_select("posts", "pid", "tid='{$post['tid']}'", $options);
 			$reply_to = $db->fetch_array($query);
@@ -753,8 +781,7 @@ class PostDataHandler extends DataHandler
 			$options = array(
 				"limit" => 1,
 				"limit_start" => 0,
-				"order_by" => "dateline",
-				"order_dir" => "asc"
+				"order_by" => "dateline, pid",
 			);
 			$query = $db->simple_select("posts", "pid", "tid='".$post['tid']."'", $options);
 			$first_check = $db->fetch_array($query);
@@ -858,22 +885,28 @@ class PostDataHandler extends DataHandler
 		else
 		{
 			// Automatic subscription to the thread
-			if($post['options']['subscriptionmethod'] != "" && $post['uid'] > 0)
+			if($post['uid'] > 0)
 			{
-				switch($post['options']['subscriptionmethod'])
-				{
-					case "pm":
-						$notification = 2;
-						break;
-					case "email":
-						$notification = 1;
-						break;
-					default:
-						$notification = 0;
-				}
-
 				require_once MYBB_ROOT."inc/functions_user.php";
-				add_subscribed_thread($post['tid'], $notification, $post['uid']);
+				if($post['options']['subscriptionmethod'] == "")
+				{
+					remove_subscribed_thread($post['tid'], $post['uid']);
+				}
+				else
+				{
+					switch($post['options']['subscriptionmethod'])
+					{
+						case "pm":
+							$notification = 2;
+							break;
+						case "email":
+							$notification = 1;
+							break;
+						default:
+							$notification = 0;
+					}
+					add_subscribed_thread($post['tid'], $notification, $post['uid']);
+				}
 			}
 
 			// Perform any selected moderation tools.
@@ -969,52 +1002,62 @@ class PostDataHandler extends DataHandler
 			// Only combine if they are both invisible (mod queue'd forum) or both visible
 			if($double_post !== true && $double_post['visible'] == $visible)
 			{
-				$this->pid = $double_post['pid'];
+				$_message = $post['message'];
 
 				$post['message'] = $double_post['message'] .= "\n".$mybb->settings['postmergesep']."\n".$post['message'];
-				$update_query = array(
-					"message" => $db->escape_string($double_post['message'])
-				);
-				$update_query['edituid'] = (int)$post['uid'];
-				$update_query['edittime'] = TIME_NOW;
-				$db->update_query("posts", $update_query, "pid='".$double_post['pid']."'");
-
-				if($draft_check)
+				
+				if ($this->validate_post())
 				{
-					$db->delete_query("posts", "pid='".$post['pid']."'");
-				}
-
-				if($post['posthash'])
-				{
-					// Assign any uploaded attachments with the specific posthash to the merged post.
-					$post['posthash'] = $db->escape_string($post['posthash']);
-
-					$query = $db->simple_select("attachments", "COUNT(aid) AS attachmentcount", "pid='0' AND visible='1' AND posthash='{$post['posthash']}'");
-					$attachmentcount = $db->fetch_field($query, "attachmentcount");
-
-					if($attachmentcount > 0)
-					{
-						// Update forum count
-						update_thread_counters($post['tid'], array('attachmentcount' => "+{$attachmentcount}"));
-					}
-
-					$attachmentassign = array(
-						"pid" => $double_post['pid'],
-						"posthash" => ''
+					$this->pid = $double_post['pid'];
+					
+					$update_query = array(
+						"message" => $db->escape_string($double_post['message'])
 					);
-					$db->update_query("attachments", $attachmentassign, "posthash='{$post['posthash']}' AND pid='0'");
+					$update_query['edituid'] = (int)$post['uid'];
+					$update_query['edittime'] = TIME_NOW;
+					$db->update_query("posts", $update_query, "pid='".$double_post['pid']."'");
+					
+					if($draft_check)
+					{
+						$db->delete_query("posts", "pid='".$post['pid']."'");
+					}
+					
+					if($post['posthash'])
+					{
+						// Assign any uploaded attachments with the specific posthash to the merged post.
+						$post['posthash'] = $db->escape_string($post['posthash']);
+						
+						$query = $db->simple_select("attachments", "COUNT(aid) AS attachmentcount", "pid='0' AND visible='1' AND posthash='{$post['posthash']}'");
+						$attachmentcount = $db->fetch_field($query, "attachmentcount");
+						
+						if($attachmentcount > 0)
+						{
+							// Update forum count
+							update_thread_counters($post['tid'], array('attachmentcount' => "+{$attachmentcount}"));
+						}
+						
+						$attachmentassign = array(
+							"pid" => $double_post['pid'],
+							"posthash" => ''
+						);
+						$db->update_query("attachments", $attachmentassign, "posthash='{$post['posthash']}' AND pid='0'");
+					}
+					
+					// Return the post's pid and whether or not it is visible.
+					$this->return_values = array(
+						"pid" => $double_post['pid'],
+						"visible" => $visible,
+						"merge" => true
+					);
+					
+					$plugins->run_hooks("datahandler_post_insert_merge", $this);
+					
+					return $this->return_values;
 				}
-
-				// Return the post's pid and whether or not it is visible.
-				$this->return_values = array(
-					"pid" => $double_post['pid'],
-					"visible" => $visible,
-					"merge" => true
-				);
-
-				$plugins->run_hooks("datahandler_post_insert_merge", $this);
-
-				return $this->return_values;
+				else
+				{
+					$post['message'] = $_message;
+				}
 			}
 		}
 
@@ -1168,23 +1211,42 @@ class PostDataHandler extends DataHandler
 						$emailsubject = $lang->emailsubject_subscription;
 						$emailmessage = $lang->email_subscription;
 					}
+
+					// If the poster is unregistered and hasn't set a username, call them Guest
+					if(!$post['uid'] && !$post['username'])
+					{
+						$post['username'] = htmlspecialchars_uni($lang->guest);
+					}
 				}
 				else
 				{
-					if($subscribedmember['notification'] == 1)
+
+					if(($subscribedmember['notification'] == 1 && !isset($langcache[$uselang]['emailsubject_subscription'])) || !isset($langcache[$uselang]['guest']))
 					{
-						if(!isset($langcache[$uselang]['emailsubject_subscription']))
+						$userlang = new MyLanguage;
+						$userlang->set_path(MYBB_ROOT."inc/languages");
+						$userlang->set_language($uselang);
+						if($subscribedmember['notification'] == 1)
 						{
-							$userlang = new MyLanguage;
-							$userlang->set_path(MYBB_ROOT."inc/languages");
-							$userlang->set_language($uselang);
 							$userlang->load("messages");
 							$langcache[$uselang]['emailsubject_subscription'] = $userlang->emailsubject_subscription;
 							$langcache[$uselang]['email_subscription'] = $userlang->email_subscription;
-							unset($userlang);
 						}
+						$userlang->load("global");
+
+						$langcache[$uselang]['guest'] = $userlang->guest;
+						unset($userlang);
+					}
+					if($subscribedmember['notification'] == 1)
+					{
 						$emailsubject = $langcache[$uselang]['emailsubject_subscription'];
 						$emailmessage = $langcache[$uselang]['email_subscription'];
+					}
+
+					// If the poster is unregistered and hasn't set a username, call them Guest
+					if(!$post['uid'] && !$post['username'])
+					{
+						$post['username'] = $langcache[$uselang]['guest'];
 					}
 				}
 
@@ -1192,8 +1254,7 @@ class PostDataHandler extends DataHandler
 				{
 					$emailsubject = $lang->sprintf($emailsubject, $subject);
 
-					$post_code = md5($subscribedmember['loginkey'].$subscribedmember['salt'].$subscribedmember['regdate']);
-					$emailmessage = $lang->sprintf($emailmessage, $subscribedmember['username'], $post['username'], $mybb->settings['bbname'], $subject, $excerpt, $mybb->settings['bburl'], str_replace("&amp;", "&", get_thread_link($thread['tid'], 0, "newpost")), $thread['tid'], $post_code);
+					$emailmessage = $lang->sprintf($emailmessage, $subscribedmember['username'], $post['username'], $mybb->settings['bbname'], $subject, $excerpt, $mybb->settings['bburl'], str_replace("&amp;", "&", get_thread_link($thread['tid'], 0, "newpost")), $thread['tid']);
 					$new_email = array(
 						"mailto" => $db->escape_string($subscribedmember['email']),
 						"mailfrom" => '',
@@ -1207,10 +1268,9 @@ class PostDataHandler extends DataHandler
 				}
 				elseif($subscribedmember['notification'] == 2)
 				{
-					$post_code = md5($subscribedmember['loginkey'].$subscribedmember['salt'].$subscribedmember['regdate']);
 					$pm = array(
 						'subject' => array('pmsubject_subscription', $subject),
-						'message' => array('pm_subscription', $subscribedmember['username'], $post['username'], $subject, $excerpt, $mybb->settings['bburl'], str_replace("&amp;", "&", get_thread_link($thread['tid'], 0, "newpost")), $thread['tid'], $post_code),
+						'message' => array('pm_subscription', $subscribedmember['username'], $post['username'], $subject, $excerpt, $mybb->settings['bburl'], str_replace("&amp;", "&", get_thread_link($thread['tid'], 0, "newpost")), $thread['tid']),
 						'touid' => $subscribedmember['uid'],
 						'language' => $subscribedmember['language'],
 						'language_file' => 'messages'
@@ -1372,7 +1432,8 @@ class PostDataHandler extends DataHandler
 		$thread = &$this->data;
 
 		// Fetch the forum this thread is being made in
-		$forum = get_forum($thread['fid']);
+		$query = $db->simple_select("forums", "*", "fid='{$thread['fid']}'");
+		$forum = $db->fetch_array($query);
 
 		// This thread is being saved as a draft.
 		if($thread['savedraft'])
@@ -1585,21 +1646,20 @@ class PostDataHandler extends DataHandler
 					}
 				}
 
-				if(!isset($forum['lastpost']))
-				{
-					$forum['lastpost'] = 0;
-				}
-
 				$done_users = array();
 
 				// Queue up any forum subscription notices to users who are subscribed to this forum.
-				$excerpt = my_substr($thread['message'], 0, $mybb->settings['subscribeexcerpt']).$lang->emailbit_viewthread;
+				$excerpt = $thread['message'];
 
 				// Parse badwords
 				require_once MYBB_ROOT."inc/class_parser.php";
 				$parser = new postParser;
 				$excerpt = $parser->parse_badwords($excerpt);
-
+				$excerpt = $parser->text_parse_message($excerpt);
+				if(strlen($excerpt) > $mybb->settings['subscribeexcerpt'])
+				{
+					$excerpt = my_substr($excerpt, 0, $mybb->settings['subscribeexcerpt']).$lang->emailbit_viewthread;
+				}
 				$query = $db->query("
 					SELECT u.username, u.email, u.uid, u.language, u.loginkey, u.salt, u.regdate
 					FROM ".TABLE_PREFIX."forumsubscriptions fs
@@ -1648,6 +1708,12 @@ class PostDataHandler extends DataHandler
 					{
 						$emailsubject = $lang->emailsubject_forumsubscription;
 						$emailmessage = $lang->email_forumsubscription;
+
+						// If the poster is unregistered and hasn't set a username, call them Guest
+						if(!$thread['uid'] && !$thread['username'])
+						{
+							$thread['username'] = htmlspecialchars_uni($lang->guest);
+						}
 					}
 					else
 					{
@@ -1657,17 +1723,24 @@ class PostDataHandler extends DataHandler
 							$userlang->set_path(MYBB_ROOT."inc/languages");
 							$userlang->set_language($uselang);
 							$userlang->load("messages");
+							$userlang->load("global");
 							$langcache[$uselang]['emailsubject_forumsubscription'] = $userlang->emailsubject_forumsubscription;
 							$langcache[$uselang]['email_forumsubscription'] = $userlang->email_forumsubscription;
+							$langcache[$uselang]['guest'] = $userlang->guest;
 							unset($userlang);
 						}
 						$emailsubject = $langcache[$uselang]['emailsubject_forumsubscription'];
 						$emailmessage = $langcache[$uselang]['email_forumsubscription'];
+
+						// If the poster is unregistered and hasn't set a username, call them Guest
+						if(!$thread['uid'] && !$thread['username'])
+						{
+							$thread['username'] = $langcache[$uselang]['guest'];
+						}
 					}
 					$emailsubject = $lang->sprintf($emailsubject, $forum['name']);
 
-					$post_code = md5($subscribedmember['loginkey'].$subscribedmember['salt'].$subscribedmember['regdate']);
-					$emailmessage = $lang->sprintf($emailmessage, $subscribedmember['username'], $thread['username'], $forum['name'], $mybb->settings['bbname'], $thread['subject'], $excerpt, $mybb->settings['bburl'], get_thread_link($this->tid), $thread['fid'], $post_code);
+					$emailmessage = $lang->sprintf($emailmessage, $subscribedmember['username'], $thread['username'], $forum['name'], $mybb->settings['bbname'], $thread['subject'], $excerpt, $mybb->settings['bburl'], get_thread_link($this->tid), $thread['fid']);
 					$new_email = array(
 						"mailto" => $db->escape_string($subscribedmember['email']),
 						"mailfrom" => '',
@@ -1806,6 +1879,20 @@ class PostDataHandler extends DataHandler
 				$plugins->run_hooks("datahandler_post_update_thread", $this);
 
 				$db->update_query("threads", $this->thread_update_data, "tid='".(int)$post['tid']."'");
+			}
+
+			// Update any moved thread links to have corresponding new subject.
+			if(isset($post['subject']))
+			{
+				$query = $db->simple_select("threads", "tid, closed", "closed='moved|".$this->tid."'");
+				if($db->num_rows($query) > 0)
+				{
+					$update_data['subject'] = $db->escape_string($post['subject']);
+					while($result = $db->fetch_array($query))
+					{
+						$db->update_query("threads", $update_data, "tid='".(int)$result['tid']."'");
+					}
+				}
 			}
 		}
 

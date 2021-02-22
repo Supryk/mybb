@@ -97,7 +97,7 @@ $l['all_user_groups'] = "All User Groups";
 $l['template_set'] = "Template Set";
 $l['template_set_desc'] = "Specify the template set the theme should use. The selected template set defines the markup (HTML) used in presenting the theme.";
 $l['editor_theme'] = "Editor Style";
-$l['editor_theme_desc'] = "Specify the style to be used for the MyCode editor in this theme. Editor styles can be found in the <strong>jscripts/editor_themes</strong> folder.";
+$l['editor_theme_desc'] = "Specify the style to be used for the MyCode editor in this theme. Editor styles can be found in the <strong>jscripts/sceditor/themes</strong> folder.";
 $l['img_directory'] = "Image Directory";
 $l['img_directory_desc'] = "The root directory for the location of the images used in this theme. Note that this only specifies the directory for the images used in templates, not the stylesheets.";
 $l['logo'] = "Board Logo";
@@ -188,6 +188,7 @@ $l['error_missing_stylesheet_name'] = "Please enter a name for this stylesheet."
 $l['error_missing_stylesheet_extension'] = "This stylesheet must end with the correct file extension, for example, {1}<em>.css</em>";
 $l['error_invalid_parent_theme'] = "The selected parent theme does not exist. Please select a valid parent theme.";
 $l['error_invalid_templateset'] = "The selected template set does not exist. Please select a valid template set.";
+$l['error_invalid_color'] = "The defined color set \"{1}\" is either having invalid character(s) or not in prescribed format. Only alpha-numeric characters are allowed for naming separated by '='.";
 $l['error_invalid_editortheme'] = "The selected editor theme does not exist. Please select a valid editor theme.";
 $l['error_inheriting_stylesheets'] = "You cannot delete this theme because there are still other themes that are inheriting stylesheets from it.";
 $l['error_cannot_parse'] = "MyBB cannot parse this stylesheet for the simple editor. It can only be edited in advanced mode.";
@@ -211,10 +212,10 @@ $l['success_stylesheet_order_updated'] = "The display orders for the stylesheets
 
 $l['confirm_theme_deletion'] = "Are you sure you want to delete this theme?";
 $l['confirm_stylesheet_deletion'] = "Are you sure you want to delete / revert this stylesheet?";
-$l['confirm_theme_forced'] = "Are you sure you want to force this theme on all users?";
+$l['confirm_theme_forced'] = "Are you sure you want to force this theme on all users? This may reset the theme's access level.";
 
 $l['theme_info_fetch_error'] = 'There was an error fetching the style info.';
 $l['theme_info_save_error'] = 'There was an error saving the style info.';
 
-$l['saving'] = 'Saving...';
+$l['saving'] = 'Saving&hellip;';
 

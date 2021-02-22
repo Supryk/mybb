@@ -14,14 +14,14 @@ class MyBB {
 	 *
 	 * @var string
 	 */
-	public $version = "1.8.12";
+	public $version = "1.8.24";
 
 	/**
 	 * The version code of MyBB we're running.
 	 *
 	 * @var integer
 	 */
-	public $version_code = 1812;
+	public $version_code = 1824;
 
 	/**
 	 * The current working directory.
@@ -161,6 +161,7 @@ class MyBB {
 		'adminsessions' => array('ip' => true),
 		'maillogs' => array('ipaddress' => true),
 		'moderatorlog' => array('ipaddress' => true),
+		'pollvotes' => array('ipaddress' => true),
 		'posts' => array('ipaddress' => true),
 		'privatemessages' => array('ipaddress' => true),
 		'searchlog' => array('ipaddress' => true),
@@ -560,6 +561,10 @@ class MyBB {
 				$message = "APC needs to be configured with PHP to use the APC cache support.";
 				$error_code = MYBB_CACHEHANDLER_LOAD_ERROR;
 				break;
+			case "apcu_load_error":
+				$message = "APCu needs to be configured with PHP to use the APCu cache support.";
+				$error_code = MYBB_CACHEHANDLER_LOAD_ERROR;
+				break;
 			case "eaccelerator_load_error":
 				$message = "eAccelerator needs to be configured with PHP to use the eAccelerator cache support.";
 				$error_code = MYBB_CACHEHANDLER_LOAD_ERROR;
@@ -574,6 +579,10 @@ class MyBB {
 				break;
 			case "xcache_load_error":
 				$message = "Xcache needs to be configured with PHP to use the Xcache cache support.";
+				$error_code = MYBB_CACHEHANDLER_LOAD_ERROR;
+				break;
+			case "redis_load_error":
+				$message = "Your server does not have redis support enabled.";
 				$error_code = MYBB_CACHEHANDLER_LOAD_ERROR;
 				break;
 			default:
@@ -598,7 +607,7 @@ class MyBB {
  */
 
 $grouppermignore = array("gid", "type", "title", "description", "namestyle", "usertitle", "stars", "starimage", "image");
-$groupzerogreater = array("pmquota", "maxpmrecipients", "maxreputationsday", "attachquota", "maxemails", "maxwarningsday", "maxposts", "edittimelimit", "canusesigxposts", "maxreputationsperuser", "maxreputationsperthread", "emailfloodtime");
+$groupzerogreater = array("pmquota", "maxpmrecipients", "maxreputationsday", "attachquota", "maxemails", "maxposts", "edittimelimit", "maxreputationsperuser", "maxreputationsperthread", "emailfloodtime");
 $displaygroupfields = array("title", "description", "namestyle", "usertitle", "stars", "starimage", "image");
 
 // These are fields in the usergroups table that are also forum permission specific.

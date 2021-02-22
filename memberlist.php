@@ -40,7 +40,7 @@ if($mybb->get_input('action') == "search")
 	add_breadcrumb($lang->nav_memberlist_search);
 
 	$contact_fields = array();
-	foreach(array('aim', 'skype', 'google', 'yahoo', 'icq') as $field)
+	foreach(array('skype', 'google', 'icq') as $field)
 	{
 		$contact_fields[$field] = '';
 		$settingkey = 'allow'.$field.'field';
@@ -55,6 +55,12 @@ if($mybb->get_input('action') == "search")
 			$bgcolors[$field] = alt_trow();
 			eval('$contact_fields[\''.$field.'\'] = "'.$templates->get('memberlist_search_contact_field').'";');
 		}
+	}
+
+	$referrals_option = '';
+	if($mybb->settings['usereferrals'] == 1)
+	{
+		eval("\$referrals_option = \"".$templates->get("memberlist_referrals_option")."\";");
 	}
 
 	eval("\$search_page = \"".$templates->get("memberlist_search")."\";");
@@ -102,7 +108,14 @@ else
 			$sort_field = "u.threadnum";
 			break;
 		case "referrals":
-			$sort_field = "u.referrals";
+			if($mybb->settings['usereferrals'] == 1)
+			{
+				$sort_field = "u.referrals";
+			}
+			else
+			{
+				$sort_field = "u.username";
+			}
 			break;
 		default:
 			$sort_field = "u.username";
@@ -140,6 +153,11 @@ else
 	}
 	$order_check[$mybb->input['order']] = " checked=\"checked\"";
 
+	if($sort_field == 'u.lastactive' && $mybb->usergroup['canviewwolinvis'] == 0)
+	{
+		$sort_field = "u.invisible ASC, CASE WHEN u.invisible = 1 THEN u.regdate ELSE u.lastactive END";
+	}
+
 	// Incoming results per page?
 	$mybb->input['perpage'] = $mybb->get_input('perpage', MyBB::INPUT_INT);
 	if($mybb->input['perpage'] > 0 && $mybb->input['perpage'] <= 500)
@@ -158,6 +176,16 @@ else
 	$search_query = '1=1';
 	$search_url = "";
 
+	switch($db->type)
+	{
+		// PostgreSQL's LIKE is case sensitive
+		case "pgsql":
+			$like = "ILIKE";
+			break;
+		default:
+			$like = "LIKE";
+	}
+
 	// Limiting results to a certain letter
 	if(isset($mybb->input['letter']))
 	{
@@ -168,7 +196,7 @@ else
 		}
 		else if(strlen($letter) == 1)
 		{
-			$search_query .= " AND u.username LIKE '".$db->escape_string_like($letter)."%'";
+			$search_query .= " AND u.username {$like} '".$db->escape_string_like($letter)."%'";
 		}
 		$search_url .= "&letter={$letter}";
 	}
@@ -182,13 +210,19 @@ else
 		// Name begins with
 		if($mybb->input['username_match'] == "begins")
 		{
-			$search_query .= " AND u.username LIKE '".$username_like_query."%'";
+			$search_query .= " AND u.username {$like} '".$username_like_query."%'";
 			$search_url .= "&username_match=begins";
 		}
 		// Just contains
+		else if($mybb->input['username_match'] == "contains")
+		{
+			$search_query .= " AND u.username {$like} '%".$username_like_query."%'";
+			$search_url .= "&username_match=contains";
+		}
+		// Exact
 		else
 		{
-			$search_query .= " AND u.username LIKE '%".$username_like_query."%'";
+			$search_query .= " AND u.username='{$username_like_query}'";
 		}
 
 		$search_url .= "&username=".urlencode($search_username);
@@ -199,12 +233,12 @@ else
 	$search_website = htmlspecialchars_uni($mybb->input['website']);
 	if(trim($mybb->input['website']))
 	{
-		$search_query .= " AND u.website LIKE '%".$db->escape_string_like($mybb->input['website'])."%'";
+		$search_query .= " AND u.website {$like} '%".$db->escape_string_like($mybb->input['website'])."%'";
 		$search_url .= "&website=".urlencode($mybb->input['website']);
 	}
 
 	// Search by contact field input
-	foreach(array('aim', 'icq', 'google', 'skype', 'yahoo') as $cfield)
+	foreach(array('icq', 'google', 'skype') as $cfield)
 	{
 		$csetting = 'allow'.$cfield.'field';
 		$mybb->input[$cfield] = trim($mybb->get_input($cfield));
@@ -240,7 +274,7 @@ else
 			}
 			else
 			{
-				$search_query .= " AND u.{$cfield} LIKE '%".$db->escape_string_like($mybb->input[$cfield])."%'";
+				$search_query .= " AND u.{$cfield} {$like} '%".$db->escape_string_like($mybb->input[$cfield])."%'";
 			}
 			$search_url .= "&{$cfield}=".urlencode($mybb->input[$cfield]);
 		}
@@ -290,6 +324,12 @@ else
 	if($page && $page > 0)
 	{
 		$start = ($page - 1) * $per_page;
+		$pages = ceil($num_users / $per_page);
+		if($page > $pages)
+		{
+			$start = 0;
+			$page = 1;
+		}
 	}
 	else
 	{
@@ -336,15 +376,38 @@ else
 		$user['profilelink'] = build_profile_link($user['username'], $user['uid']);
 
 		// Get the display usergroup
-		if(empty($user['displaygroup']))
+		if($user['usergroup'])
+		{
+			$usergroup = usergroup_permissions($user['usergroup']);
+		}
+		else
+		{
+			$usergroup = usergroup_permissions(1);
+		}
+
+		$displaygroupfields = array("title", "description", "namestyle", "usertitle", "stars", "starimage", "image");
+
+		if(!$user['displaygroup'])
 		{
 			$user['displaygroup'] = $user['usergroup'];
 		}
-		$usergroup = $usergroups_cache[$user['displaygroup']];
+
+		$display_group = usergroup_displaygroup($user['displaygroup']);
+		if(is_array($display_group))
+		{
+			$usergroup = array_merge($usergroup, $display_group);
+		}
 
 		// Build referral?
 		if($mybb->settings['usereferrals'] == 1)
 		{
+			$referral_count = (int) $user['referrals'];
+			if($referral_count > 0)
+			{
+				$uid = (int) $user['uid'];
+				eval("\$user['referrals'] = \"".$templates->get('member_referrals_link')."\";");
+			}
+
 			eval("\$referral_bit = \"".$templates->get("memberlist_referrals_bit")."\";");
 		}
 
@@ -425,19 +488,22 @@ else
 		$useravatar = format_avatar($user['avatar'], $user['avatardimensions'], my_strtolower($mybb->settings['memberlistmaxavatarsize']));
 		eval("\$user['avatar'] = \"".$templates->get("memberlist_user_avatar")."\";");
 
-		if($user['invisible'] == 1 && $mybb->usergroup['canviewwolinvis'] != 1 && $user['uid'] != $mybb->user['uid'])
+		$last_seen = max(array($user['lastactive'], $user['lastvisit']));
+		if(empty($last_seen))
 		{
 			$user['lastvisit'] = $lang->lastvisit_never;
-
-			if($user['lastvisit'])
-			{
-				// We have had at least some active time, hide it instead
-				$user['lastvisit'] = $lang->lastvisit_hidden;
-			}
 		}
 		else
 		{
-			$user['lastvisit'] = my_date('relative', $user['lastactive']);
+			// We have some stamp here
+			if($user['invisible'] == 1 && $mybb->usergroup['canviewwolinvis'] != 1 && $user['uid'] != $mybb->user['uid'])
+			{
+				$user['lastvisit'] = $lang->lastvisit_hidden;
+			}
+			else
+			{
+				$user['lastvisit'] = my_date('relative', $last_seen);
+			}
 		}
 
 		$user['regdate'] = my_date('relative', $user['regdate']);
@@ -450,6 +516,12 @@ else
 	if(!$users)
 	{
 		eval("\$users = \"".$templates->get("memberlist_error")."\";");
+	}
+
+	$referrals_option = '';
+	if($mybb->settings['usereferrals'] == 1)
+	{
+		eval("\$referrals_option = \"".$templates->get("memberlist_referrals_option")."\";");
 	}
 
 	$plugins->run_hooks("memberlist_end");

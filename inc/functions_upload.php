@@ -21,7 +21,7 @@ function remove_attachment($pid, $posthash, $aid)
 	global $db, $mybb, $plugins;
 	$aid = (int)$aid;
 	$posthash = $db->escape_string($posthash);
-	if($posthash != "")
+	if(!empty($posthash))
 	{
 		$query = $db->simple_select("attachments", "aid, attachname, thumbnail, visible", "aid='{$aid}' AND posthash='{$posthash}'");
 		$attachment = $db->fetch_array($query);
@@ -33,6 +33,12 @@ function remove_attachment($pid, $posthash, $aid)
 	}
 
 	$plugins->run_hooks("remove_attachment_do_delete", $attachment);
+
+	if($attachment === false)
+	{
+		// no attachment found with the given details
+		return;
+	}
 
 	$db->delete_query("attachments", "aid='{$attachment['aid']}'");
 
@@ -56,7 +62,8 @@ function remove_attachment($pid, $posthash, $aid)
 		}
 
 		$date_directory = explode('/', $attachment['attachname']);
-		if(@is_dir($uploadpath."/".$date_directory[0]))
+		$query_indir = $db->simple_select("attachments", "COUNT(aid) as indir", "attachname LIKE '".$db->escape_string_like($date_directory[0])."/%'");
+		if($db->fetch_field($query_indir, 'indir') == 0 && @is_dir($uploadpath."/".$date_directory[0]))
 		{
 			delete_upload_directory($uploadpath."/".$date_directory[0]);
 		}
@@ -125,7 +132,8 @@ function remove_attachments($pid, $posthash="")
 			}
 
 			$date_directory = explode('/', $attachment['attachname']);
-			if(@is_dir($uploadpath."/".$date_directory[0]))
+			$query_indir = $db->simple_select("attachments", "COUNT(aid) as indir", "attachname LIKE '".$db->escape_string_like($date_directory[0])."/%'");
+			if($db->fetch_field($query_indir, 'indir') == 0 && @is_dir($uploadpath."/".$date_directory[0]))
 			{
 				delete_upload_directory($uploadpath."/".$date_directory[0]);
 			}
@@ -172,6 +180,18 @@ function remove_avatars($uid, $exclude="")
 
 		@closedir($dir);
 	}
+}
+
+/**
+ * Create the attachment directory index file.
+ * 
+ * @param string $path The path to the attachment directory to create the file in.
+ */
+function create_attachment_index($path)
+{
+	$index = @fopen(rtrim($path, '/').'/index.html', 'w');
+	@fwrite($index, '<html>\n<head>\n<title></title>\n</head>\n<body>\n&nbsp;\n</body>\n</html>');
+	@fclose($index);
 }
 
 /**
@@ -250,7 +270,7 @@ function upload_avatar($avatar=array(), $uid=0)
 	// Check avatar dimensions
 	if($mybb->settings['maxavatardims'] != '')
 	{
-		list($maxwidth, $maxheight) = @explode("x", $mybb->settings['maxavatardims']);
+		list($maxwidth, $maxheight) = @preg_split('/[|x]/', $mybb->settings['maxavatardims']);
 		if(($maxwidth && $img_dimensions[0] > $maxwidth) || ($maxheight && $img_dimensions[1] > $maxheight))
 		{
 			// Automatic resizing enabled?
@@ -336,7 +356,7 @@ function upload_avatar($avatar=array(), $uid=0)
 	}
 
 	// Next check the file size
-	if(($avatar['size'] > ($mybb->settings['avatarsize']*1024) && $mybb->settings['avatarsize'] > 0) || $avatar['size'] > $allowed_mime_types[$avatar['type']] && !($mybb->settings['avatarsize'] > 0))
+	if(($mybb->settings['avatarsize'] > 0 && $avatar['size'] > ($mybb->settings['avatarsize']*1024)) || $avatar['size'] > ($allowed_mime_types[$avatar['type']]*1024))
 	{
 		delete_uploaded_file($avatarpath."/".$filename);
 		$ret['error'] = $lang->error_uploadsize;
@@ -369,36 +389,6 @@ function upload_attachment($attachment, $update_attachment=false)
 	$posthash = $db->escape_string($mybb->get_input('posthash'));
 	$pid = (int)$pid;
 
-	if(isset($attachment['error']) && $attachment['error'] != 0)
-	{
-		$ret['error'] = $lang->error_uploadfailed.$lang->error_uploadfailed_detail;
-		switch($attachment['error'])
-		{
-			case 1: // UPLOAD_ERR_INI_SIZE
-				$ret['error'] .= $lang->error_uploadfailed_php1;
-				break;
-			case 2: // UPLOAD_ERR_FORM_SIZE
-				$ret['error'] .= $lang->error_uploadfailed_php2;
-				break;
-			case 3: // UPLOAD_ERR_PARTIAL
-				$ret['error'] .= $lang->error_uploadfailed_php3;
-				break;
-			case 4: // UPLOAD_ERR_NO_FILE
-				$ret['error'] .= $lang->error_uploadfailed_php4;
-				break;
-			case 6: // UPLOAD_ERR_NO_TMP_DIR
-				$ret['error'] .= $lang->error_uploadfailed_php6;
-				break;
-			case 7: // UPLOAD_ERR_CANT_WRITE
-				$ret['error'] .= $lang->error_uploadfailed_php7;
-				break;
-			default:
-				$ret['error'] .= $lang->sprintf($lang->error_uploadfailed_phpx, $attachment['error']);
-				break;
-		}
-		return $ret;
-	}
-
 	if(!is_uploaded_file($attachment['tmp_name']) || empty($attachment['tmp_name']))
 	{
 		$ret['error'] = $lang->error_uploadfailed.$lang->error_uploadfailed_php4;
@@ -429,10 +419,18 @@ function upload_attachment($attachment, $update_attachment=false)
 		$attachtype = $attachtypes[$ext];
 	}
 
+	// check the length of the filename
+	$maxFileNameLength = 255;
+	if(my_strlen($attachment['name']) > $maxFileNameLength)
+	{
+		$ret['error'] = $lang->sprintf($lang->error_attach_filename_length, htmlspecialchars_uni($attachment['name']), $maxFileNameLength);
+		return $ret;
+	}
+
 	// Check the size
 	if($attachment['size'] > $attachtype['maxsize']*1024 && $attachtype['maxsize'] != "")
 	{
-		$ret['error'] = $lang->sprintf($lang->error_attachsize, $attachtype['maxsize']);
+		$ret['error'] = $lang->sprintf($lang->error_attachsize, htmlspecialchars_uni($attachment['name']), $attachtype['maxsize']);
 		return $ret;
 	}
 
@@ -464,7 +462,7 @@ function upload_attachment($attachment, $update_attachment=false)
 	}
 	$query = $db->simple_select("attachments", "*", "filename='".$db->escape_string($attachment['name'])."' AND ".$uploaded_query);
 	$prevattach = $db->fetch_array($query);
-	if($prevattach['aid'] && $update_attachment == false)
+	if(!empty($prevattach) && $prevattach['aid'] && $update_attachment == false)
 	{
 		if(!$mybb->usergroup['caneditattachments'] && !$forumpermissions['caneditattachments'])
 		{
@@ -472,7 +470,7 @@ function upload_attachment($attachment, $update_attachment=false)
 			return $ret;
 		}
 
-		$ret['error'] = $lang->error_alreadyuploaded;
+		$ret['error'] = $lang->sprintf($lang->error_alreadyuploaded, htmlspecialchars_uni($attachment['name']));
 		return $ret;
 	}
 
@@ -503,9 +501,7 @@ function upload_attachment($attachment, $update_attachment=false)
 			}
 			else
 			{
-				$index = @fopen($mybb->settings['uploadspath']."/".$month_dir."/index.html", 'w');
-				@fwrite($index, "<html>\n<head>\n<title></title>\n</head>\n<body>\n&nbsp;\n</body>\n</html>");
-				@fclose($index);
+				create_attachment_index($mybb->settings['uploadspath']."/".$month_dir);
 			}
 		}
 	}
@@ -642,7 +638,7 @@ function upload_attachment($attachment, $update_attachment=false)
 
 	$attacharray = $plugins->run_hooks("upload_attachment_do_insert", $attacharray);
 
-	if($prevattach['aid'] && $update_attachment == true)
+	if(!empty($prevattach) && $prevattach['aid'] && $update_attachment == true)
 	{
 		unset($attacharray['downloads']); // Keep our download count if we're updating an attachment
 		$db->update_query("attachments", $attacharray, "aid='".$db->escape_string($prevattach['aid'])."'");
@@ -659,7 +655,8 @@ function upload_attachment($attachment, $update_attachment=false)
 			}
 
 			$date_directory = explode('/', $prevattach['attachname']);
-			if(@is_dir($mybb->settings['uploadspath']."/".$date_directory[0]))
+			$query_indir = $db->simple_select("attachments", "COUNT(aid) as indir", "attachname LIKE '".$db->escape_string_like($date_directory[0])."/%'");
+			if($db->fetch_field($query_indir, 'indir') == 0 && @is_dir($mybb->settings['uploadspath']."/".$date_directory[0]))
 			{
 				delete_upload_directory($mybb->settings['uploadspath']."/".$date_directory[0]);
 			}
@@ -676,6 +673,153 @@ function upload_attachment($attachment, $update_attachment=false)
 		}
 	}
 	$ret['aid'] = $aid;
+	return $ret;
+}
+
+/**
+ * Check whether the input $FILE variable indicates a PHP file upload error,
+ * and if so, return an appropriate user-friendly error message.
+ *
+ * @param array $FILE File data (as fed by PHP's $_FILE).
+ *
+ * @return string Error message or empty if no error detected.
+ */
+function check_parse_php_upload_err($FILE)
+{
+	global $lang;
+
+	$err = '';
+
+	if(isset($FILE['error']) && $FILE['error'] != 0 && ($FILE['error'] != UPLOAD_ERR_NO_FILE || $FILE['name']))
+	{
+		$err = $lang->error_uploadfailed.$lang->error_uploadfailed_detail;
+		switch($FILE['error'])
+		{
+			case 1: // UPLOAD_ERR_INI_SIZE
+				$err .= $lang->error_uploadfailed_php1;
+				break;
+			case 2: // UPLOAD_ERR_FORM_SIZE
+				$err .= $lang->error_uploadfailed_php2;
+				break;
+			case 3: // UPLOAD_ERR_PARTIAL
+				$err .= $lang->error_uploadfailed_php3;
+				break;
+			case 4: // UPLOAD_ERR_NO_FILE
+				$err .= $lang->error_uploadfailed_php4;
+				break;
+			case 6: // UPLOAD_ERR_NO_TMP_DIR
+				$err .= $lang->error_uploadfailed_php6;
+				break;
+			case 7: // UPLOAD_ERR_CANT_WRITE
+				$err .= $lang->error_uploadfailed_php7;
+				break;
+			default:
+				$err .= $lang->sprintf($lang->error_uploadfailed_phpx, $FILE['error']);
+				break;
+		}
+	}
+
+	return $err;
+}
+
+/**
+ * Process adding attachment(s) when the "Add Attachment" button is pressed.
+ *
+ * @param int $pid The ID of the post.
+ * @param array $forumpermission The permissions for the forum.
+ * @param string $attachwhere Search string "pid='$pid'" or "posthash='".$db->escape_string($mybb->get_input('posthash'))."'"
+ * @param string $action Where called from: "newthread", "newreply", or "editpost"
+ *
+ * @return array Array of errors if any, empty array otherwise
+ */
+function add_attachments($pid, $forumpermissions, $attachwhere, $action=false)
+{
+	global $db, $mybb, $editdraftpid, $lang;
+
+	$ret = array();
+
+	if($forumpermissions['canpostattachments'])
+	{
+		$attachments = array();
+		$fields = array ('name', 'type', 'tmp_name', 'error', 'size');
+		$aid = array();
+
+		$total = isset($_FILES['attachments']['name']) ? count($_FILES['attachments']['name']) : 0;
+		$filenames = "";
+		$delim = "";
+		for($i=0; $i<$total; ++$i)
+		{
+			foreach($fields as $field)
+			{
+				$attachments[$i][$field] = $_FILES['attachments'][$field][$i];
+			}
+
+			$FILE = $attachments[$i];
+			if(!empty($FILE['name']) && !empty($FILE['type']) && $FILE['size'] > 0)
+			{
+				$filenames .= $delim . "'" . $db->escape_string($FILE['name']) . "'";
+				$delim = ",";
+			}
+		}
+
+		if ($filenames != '')
+		{
+			$query = $db->simple_select("attachments", "filename", "{$attachwhere} AND filename IN (".$filenames.")");
+
+			while ($row = $db->fetch_array($query))
+			{
+				$aid[$row['filename']] = true;
+			}
+		}
+
+		foreach($attachments as $FILE)
+		{
+			if($err = check_parse_php_upload_err($FILE))
+			{
+				$ret['errors'][] = $err;
+				$mybb->input['action'] = $action;
+			}
+			else if(!empty($FILE['name']) && !empty($FILE['type']))
+			{
+				if($FILE['size'] > 0)
+				{
+					$filename = $db->escape_string($FILE['name']);
+					$exists = !empty($aid[$filename]);
+
+					$update_attachment = false;
+					if($action == "editpost")
+					{
+						if($exists && $mybb->get_input('updateattachment') && ($mybb->usergroup['caneditattachments'] || $forumpermissions['caneditattachments']))
+						{
+							$update_attachment = true;
+						}
+					}
+					else
+					{
+						if($exists && $mybb->get_input('updateattachment'))
+						{
+							$update_attachment = true;
+						}
+					}
+
+					$attachedfile = upload_attachment($FILE, $update_attachment);
+
+					if(!empty($attachedfile['error']))
+					{
+						$ret['errors'][] = $attachedfile['error'];
+						$mybb->input['action'] = $action;
+					}
+
+				}
+				else
+				{
+					$ret['errors'][] = $lang->sprintf($lang->error_uploadempty, htmlspecialchars_uni($FILE['name']));
+					$mybb->input['action'] = $action;
+				}
+			}
+		}
+	}
+
 	return $ret;
 }
 
@@ -698,7 +842,7 @@ function delete_uploaded_file($path = '')
 	$path = ltrim($path, '/');
 	$cdn_path = realpath($cdn_base_path . '/' . $path);
 
-	if($mybb->settings['usecdn'] && !empty($cdn_base_path))
+	if(!empty($mybb->settings['usecdn']) && !empty($cdn_base_path))
 	{
 		$deleted = $deleted && @unlink($cdn_path);
 	}
@@ -726,13 +870,15 @@ function delete_upload_directory($path = '')
 
 	$deleted = false;
 
+	$deleted_index = @unlink(rtrim($path, '/').'/index.html');
+
 	$deleted = @rmdir($path);
 
 	$cdn_base_path = rtrim($mybb->settings['cdnpath'], '/');
 	$path = ltrim($path, '/');
 	$cdn_path = rtrim(realpath($cdn_base_path . '/' . $path), '/');
 
-	if($mybb->settings['usecdn'] && !empty($cdn_base_path))
+	if(!empty($mybb->settings['usecdn']) && !empty($cdn_base_path))
 	{
 		$deleted = $deleted && @rmdir($cdn_path);
 	}
@@ -743,6 +889,12 @@ function delete_upload_directory($path = '')
 	);
 
 	$plugins->run_hooks('delete_upload_directory', $hook_params);
+
+	// If not successfully deleted then reinstante the index file
+	if(!$deleted && $deleted_index)
+	{
+		create_attachment_index($path);
+	}
 
 	return $deleted;
 }

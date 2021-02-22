@@ -14,6 +14,12 @@ if(!defined("IN_MYBB"))
 	die("Direct initialization of this file is not allowed.<br /><br />Please make sure IN_MYBB is defined.");
 }
 
+// Fallback
+if(!defined('THIS_SCRIPT'))
+{
+	define('THIS_SCRIPT', 'unknown');
+}
+
 /* Defines the root directory for MyBB.
 
 	Uncomment the below line and set the path manually
@@ -40,6 +46,9 @@ if(function_exists('date_default_timezone_set') && !ini_get('date.timezone'))
 
 require_once MYBB_ROOT."inc/class_error.php";
 $error_handler = new errorHandler();
+
+// Show errors triggered during initialization
+$error_handler->force_display_errors = true;
 
 if(!function_exists('json_encode') || !function_exists('json_decode'))
 {
@@ -226,6 +235,8 @@ if(!defined("IN_INSTALL") && !defined("IN_UPGRADE") && $version['version_code'] 
 		$mybb->trigger_generic_error("board_not_upgraded");
 	}
 }
+
+$error_handler->force_display_errors = false;
 
 // Load plugins
 if(!defined("NO_PLUGINS") && !($mybb->settings['no_plugins'] == 1))

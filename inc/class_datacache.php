@@ -94,6 +94,16 @@ class datacache
 				require_once MYBB_ROOT."/inc/cachehandlers/apc.php";
 				$this->handler = new apcCacheHandler();
 				break;
+			// APCu cache
+			case "apcu":
+				require_once MYBB_ROOT."/inc/cachehandlers/apcu.php";
+				$this->handler = new apcuCacheHandler();
+				break;
+			// Redis cache
+			case "redis":
+				require_once MYBB_ROOT."/inc/cachehandlers/redis.php";
+				$this->handler = new redisCacheHandler();
+				break;
 		}
 
 		if($this->handler instanceof CacheHandlerInterface)
@@ -163,7 +173,7 @@ class datacache
 				// Fetch from database
 				$query = $db->simple_select("datacache", "title,cache", "title='".$db->escape_string($name)."'");
 				$cache_data = $db->fetch_array($query);
-				$data = unserialize($cache_data['cache']);
+				$data = my_unserialize($cache_data['cache']);
 
 				// Update cache for handler
 				get_execution_time();
@@ -213,7 +223,7 @@ class datacache
 	 * Update cache contents.
 	 *
 	 * @param string $name The cache content identifier.
-	 * @param string $contents The cache content.
+	 * @param mixed $contents The cache content.
 	 */
 	function update($name, $contents)
 	{
@@ -222,7 +232,7 @@ class datacache
 		$this->cache[$name] = $contents;
 
 		// We ALWAYS keep a running copy in the db just incase we need it
-		$dbcontents = $db->escape_string(serialize($contents));
+		$dbcontents = $db->escape_string(my_serialize($contents));
 
 		$replace_array = array(
 			"title" => $db->escape_string($name),
@@ -258,7 +268,7 @@ class datacache
 	 */
 	 function delete($name, $greedy = false)
 	 {
-		 global $db, $mybb, $cache;
+		global $db, $mybb, $cache;
 
 		// Prepare for database query.
 		$dbname = $db->escape_string($name);
@@ -561,7 +571,7 @@ class datacache
 	{
 		global $forum_cache, $db;
 
-		$this->built_forum_permissions = array(0);
+		$this->forum_permissions = $this->built_forum_permissions = array(0);
 
 		// Get our forum list
 		cache_forums(true);
@@ -618,7 +628,7 @@ class datacache
 					$perms = $permissions;
 					foreach($usergroups as $gid)
 					{
-						if($this->forum_permissions[$forum['fid']][$gid])
+						if(isset($this->forum_permissions[$forum['fid']][$gid]) && $this->forum_permissions[$forum['fid']][$gid])
 						{
 							$perms[$gid] = $this->forum_permissions[$forum['fid']][$gid];
 						}
@@ -666,15 +676,25 @@ class datacache
 				break;
 		}
 
-		$query = $db->query('
-			SELECT u.uid, u.username, COUNT(pid) AS poststoday
-			FROM '.TABLE_PREFIX.'posts p
-			LEFT JOIN '.TABLE_PREFIX.'users u ON (p.uid=u.uid)
-			WHERE p.dateline>'.$timesearch.'
-			GROUP BY '.$group_by.' ORDER BY poststoday DESC
-			LIMIT 1
-		');
-		$topposter = $db->fetch_array($query);
+		$query = $db->query("
+			SELECT u.uid, u.username, COUNT(*) AS poststoday
+			FROM {$db->table_prefix}posts p
+			LEFT JOIN {$db->table_prefix}users u ON (p.uid=u.uid)
+			WHERE p.dateline > {$timesearch} AND p.visible=1
+			GROUP BY {$group_by}
+			ORDER BY poststoday DESC
+		");
+
+		$most_posts = 0;
+		$topposter = array();
+		while($user = $db->fetch_array($query))
+		{
+			if($user['poststoday'] > $most_posts)
+			{
+				$most_posts = $user['poststoday'];
+				$topposter = $user;
+			}
+		}
 
 		$query = $db->simple_select('users', 'COUNT(uid) AS posters', 'postnum>0');
 		$posters = $db->fetch_field($query, 'posters');
@@ -808,7 +828,7 @@ class datacache
 			{
 				foreach($main as $forum)
 				{
-					$forum_mods = '';
+					$forum_mods = array();
 					if(count($moderators))
 					{
 						$forum_mods = $moderators;
@@ -885,21 +905,21 @@ class datacache
 	 */
 	function update_reportedcontent()
 	{
-		global $db, $mybb;
+		global $db;
 
 		$query = $db->simple_select("reportedcontent", "COUNT(rid) AS unreadcount", "reportstatus='0'");
-		$num = $db->fetch_array($query);
+		$unreadcount = $db->fetch_field($query, 'unreadcount');
 
 		$query = $db->simple_select("reportedcontent", "COUNT(rid) AS reportcount");
-		$total = $db->fetch_array($query);
-
-		$query = $db->simple_select("reportedcontent", "dateline", "reportstatus='0'", array('order_by' => 'dateline', 'order_dir' => 'DESC'));
-		$latest = $db->fetch_array($query);
+		$reportcount = $db->fetch_field($query, 'reportcount');
+		
+		$query = $db->simple_select("reportedcontent", "dateline", "reportstatus='0'", array('order_by' => 'dateline', 'order_dir' => 'DESC', 'limit' => 1));
+		$dateline = $db->fetch_field($query, 'dateline');
 
 		$reports = array(
-			"unread" => $num['unreadcount'],
-			"total" => $total['reportcount'],
-			"lastdateline" => $latest['dateline']
+			'unread' => $unreadcount,
+			'total' => $reportcount,
+			'lastdateline' => $dateline,
 		);
 
 		$this->update("reportedcontent", $reports);
@@ -1080,19 +1100,12 @@ class datacache
 		$this->update("most_viewed_threads", $threads);
 	}
 
+	/**
+	 * @deprecated
+	 */
 	function update_banned()
 	{
-		global $db;
-
-		$bans = array();
-
-		$query = $db->simple_select("banned");
-		while($ban = $db->fetch_array($query))
-		{
-			$bans[$ban['uid']] = $ban;
-		}
-
-		$this->update("banned", $bans);
+		// "banned" cache removed
 	}
 
 	function update_birthdays()
@@ -1329,10 +1342,5 @@ class datacache
 
 		$query = $db->simple_select("datacache", "title,cache", "title='adminnotes'");
 		$this->update("adminnotes", unserialize($db->fetch_field($query, "cache")));
-	}
-
-	function reload_mybb_credits()
-	{
-		admin_redirect('index.php?module=home-credits&amp;fetch_new=-2');
 	}
 }
